@@ -1,3 +1,13 @@
+// box 尺寸 / 偏移异常检测
+//
+// 职责边界：
+// - 本文件只做顶层 box 走链和 data_offset 落点检查
+// - 样本大小与 mdat payload 的精确覆盖由 detectMoofMdatFragments 负责
+//   （那边会解析全部 traf/traf，避免这里重复实现一套样本表解析）
+
+import { parseMoof } from './mp4FragmentParser.js';
+import type { Mp4BoxTop } from '../../model/mp4.js';
+
 function readBoxSize(buf: Buffer, offset: number): { size: number; headerSize: number } {
     if (offset + 8 > buf.length) return { size: 0, headerSize: 8 }; // 会被 header_truncated 捕获
     const size32 = buf.readUInt32BE(offset);
@@ -11,8 +21,8 @@ function readBoxSize(buf: Buffer, offset: number): { size: number; headerSize: n
     return { size: size32, headerSize: 8 };
 }
 
-function parseTopLevelBoxes(buf: Buffer): Top[] {
-    const out: Top[] = [];
+function parseTopLevelBoxes(buf: Buffer): Mp4BoxTop[] {
+    const out: Mp4BoxTop[] = [];
     let off = 0;
     while (off + 8 <= buf.length) {
         const { size, headerSize } = readBoxSize(buf, off);
@@ -26,73 +36,6 @@ function parseTopLevelBoxes(buf: Buffer): Top[] {
     }
     return out;
 }
-
-function parseInnerBoxes(buf: Buffer, base: number, total: number) {
-    const boxes: { offset: number; size: number; type: string }[] = [];
-    let off = base + 8; // 简化：不展开 extended header，因为上面 readBoxSize 已给出 headerSize
-    const end = base + total;
-    while (off + 8 <= end) {
-        const { size, headerSize } = readBoxSize(buf, off);
-        const type = buf.toString("ascii", off + 4, off + 8);
-        if (size < headerSize || off + size > end) {
-            boxes.push({ offset: off, size, type });
-            break;
-        }
-        boxes.push({ offset: off, size, type });
-        off += size;
-    }
-    return boxes;
-}
-
-function parseTfhdTrunQuick(buf: Buffer, moof: Top) {
-    const inner = parseInnerBoxes(buf, moof.offset, moof.size);
-    const traf = inner.find(b => b.type === "traf");
-    if (!traf) return {};
-
-    const children = parseInnerBoxes(buf, traf.offset, traf.size);
-    const tfhd = children.find(b => b.type === "tfhd");
-    const trun = children.find(b => b.type === "trun");
-
-    let defaultSampleSize: number | undefined;
-    if (tfhd) {
-        const payloadLen = tfhd.size - 12;
-        if (payloadLen >= 4) {
-            defaultSampleSize = buf.readUInt32BE(tfhd.offset + tfhd.size - 4);
-        }
-    }
-    if (!trun) return { defaultSampleSize };
-
-    const flags = buf.readUIntBE(trun.offset + 9, 3);
-    const sampleCount = buf.readUInt32BE(trun.offset + 12);
-    let cursor = trun.offset + 16;
-
-    const DATA_OFFSET = 0x000001;
-    const FIRST_SAMPLE_FLAGS = 0x000004;
-    const SAMPLE_DURATION = 0x000100;
-    const SAMPLE_SIZE = 0x000200;
-    const SAMPLE_FLAGS = 0x000400;
-    const SAMPLE_CTO = 0x000800;
-
-    let dataOffsetVal: number | undefined;
-    if (flags & DATA_OFFSET) { dataOffsetVal = buf.readInt32BE(cursor); cursor += 4; }
-    if (flags & FIRST_SAMPLE_FLAGS) cursor += 4;
-
-    let sizeSum = 0;
-    for (let i = 0; i < sampleCount; i++) {
-        if (flags & SAMPLE_DURATION) cursor += 4;
-        if (flags & SAMPLE_SIZE) { sizeSum += buf.readUInt32BE(cursor); cursor += 4; }
-        if (flags & SAMPLE_FLAGS) cursor += 4;
-        if (flags & SAMPLE_CTO) cursor += 4;
-    }
-
-    return {
-        defaultSampleSize,
-        sampleCount,
-        sampleSizeSum: sizeSum > 0 ? sizeSum : undefined,
-        dataOffset: dataOffsetVal
-    };
-}
-
 
 function sanityCheckBoxes(buf: Buffer) {
     const boxes = parseTopLevelBoxes(buf);
@@ -145,12 +88,10 @@ function sanityCheckBoxes(buf: Buffer) {
     return { boxes, issues };
 }
 
-type Top = { offset: number; size: number; type: string; headerSize: number };
-
 /**
  * box 尺寸或偏移异常检测
  * @param buf 待检查的 Buffer
- * @returns 
+ * @returns
  */
 function detectBoxSizeOrOffsetIssues(buf: Buffer) {
     const { boxes, issues } = sanityCheckBoxes(buf);
@@ -159,13 +100,13 @@ function detectBoxSizeOrOffsetIssues(buf: Buffer) {
         return { boxes, issues }; // 已有致命问题
     }
 
-    // moof --> mdat 配对 + data_offset 落点检查
+    // moof → mdat 配对 + 全部 traf 的 data_offset 落点检查
     for (let i = 0; i < boxes.length; i++) {
         const b = boxes[i];
         if (b.type !== "moof") continue;
 
         // 找到随后最近的 mdat（在下一个 moof 之前）
-        let mdat: Top | undefined;
+        let mdat: Mp4BoxTop | undefined;
         for (let j = i + 1; j < boxes.length; j++) {
             if (boxes[j].type === "mdat") { mdat = boxes[j]; break; }
             if (boxes[j].type === "moof") break;
@@ -175,38 +116,40 @@ function detectBoxSizeOrOffsetIssues(buf: Buffer) {
             continue;
         }
 
-        // 可选：trun.data_offset 落点是否在 mdat payload 内
-        const info = parseTfhdTrunQuick(buf, b);
-        if (info && typeof info.dataOffset === "number") {
-            const moofStart = b.offset;
-            const probe = moofStart + info.dataOffset; // 通常 data_offset 相对于 moof 起点
-            const mdatPayloadStart = mdat.offset + 8;
-            const mdatPayloadEnd = mdat.offset + mdat.size;
-            if (probe < mdatPayloadStart || probe >= mdatPayloadEnd) {
-                issues.push({
-                    kind: "data_offset_out_of_mdat",
-                    detail: `trun.data_offset(${info.dataOffset}) => ${probe}, not in mdat[${mdatPayloadStart}, ${mdatPayloadEnd})`,
-                    at: b.offset
-                });
-            }
-        }
+        const payloadStart = mdat.offset + mdat.headerSize;
+        const mdatEnd = mdat.offset + mdat.size;
+        const moof = parseMoof(buf, b);
+        let prevTrafEnd: number | undefined;
 
-        // 若能拿到样本总字节（或 defaultSampleSize*count），再对比 mdat payload
-        const need =
-            (info.sampleSizeSum !== undefined && info.sampleSizeSum) ||
-            (info.sampleCount !== undefined && info.defaultSampleSize !== undefined
-                ? info.sampleCount * info.defaultSampleSize
-                : undefined);
+        for (const traf of moof.trafs) {
+            if (traf.parseError) continue;
 
-        if (need !== undefined) {
-            const payload = Math.max(0, mdat.size - 8);
-            if (need > payload) {
-                issues.push({
-                    kind: "trun_mismatch",
-                    detail: `need ${need} bytes > mdat payload ${payload}`,
-                    at: b.offset
-                });
+            // base data offset 优先级：显式 base_data_offset > default-base-is-moof > 上一个 traf 的数据末尾
+            const base = traf.baseDataOffset !== undefined
+                ? traf.baseDataOffset
+                : (traf.tfhdFlags & 0x020000) ? b.offset : (prevTrafEnd ?? b.offset);
+
+            let runStart = base;
+            for (const trun of traf.truns) {
+                const start = trun.dataOffset !== undefined ? base + trun.dataOffset : runStart;
+                if (start < payloadStart || start >= mdatEnd) {
+                    issues.push({
+                        kind: "data_offset_out_of_mdat",
+                        detail: `track=${traf.trackId} trun@${trun.offset}: start=${start} 不在 mdat payload [${payloadStart}, ${mdatEnd}) 内`,
+                        at: b.offset,
+                    });
+                } else if (trun.sampleSizesKnown && !trun.truncated && start + trun.sampleSizeSum > mdatEnd) {
+                    issues.push({
+                        kind: "sample_data_exceeds_mdat",
+                        detail: `track=${traf.trackId} trun@${trun.offset}: 样本结束 ${start + trun.sampleSizeSum} > mdat end ${mdatEnd}`,
+                        at: b.offset,
+                    });
+                }
+
+                if (trun.sampleSizesKnown && !trun.truncated) runStart = start + trun.sampleSizeSum;
+                else runStart = start;
             }
+            if (runStart > (prevTrafEnd ?? -1)) prevTrafEnd = runStart;
         }
     }
 

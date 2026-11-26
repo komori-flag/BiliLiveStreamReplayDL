@@ -110,7 +110,7 @@ class Log {
         'onlyCache': false,
         'logPrint': true,
         'logPrintLevel': 'info',
-        'maxCacheSize': 5000  // 默认缓存最大1000条日志
+        'maxCacheSize': 10000  // 默认缓存最大1000条日志
     }
 
     #level = 0;
@@ -160,8 +160,12 @@ class Log {
     }
 
     async close(callback = () => { }) {
-        if (this.#closed)
+        // 已关闭也必须回调：调用方（全局异常处理器）依赖它来 process.exit，
+        // 直接 return 会让进程僵住 —— 表现为日志已关、应用却还在跑且什么都不记
+        if (this.#closed) {
+            callback();
             return;
+        }
 
         await this.info("Log closed");
 
@@ -215,14 +219,30 @@ class Log {
      * @param modulePath 模块路径
      * @param stackTraceLine 代码执行位置行列数
      */
-    async info(message: string, modulePath?: string, stackTraceLine?: string) {
-        if (this.#level <= 2) {
-            const msg = `${formatTimestamp()} | INFO |${modulePath ? ` ${modulePath}:${stackTraceLine || this.#getStackTrace()} |` : ` ${extractStackTracePath(4)} |`} ${message}`;
+    /**
+     * 统一的日志写入流程（四个等级共用）
+     *
+     * ⚠️ 调用方基本都是不 await 地调用这些方法，所以任何异常都必须在这里消化：
+     * 否则会变成未捕获的 Promise 拒绝，被入口的全局处理直接 process.exit 掉整个应用
+     * （曾因调用栈过浅取不到位置信息而崩在启动阶段）。
+     */
+    async #write(
+        level: 1 | 2 | 3 | 4,
+        label: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR',
+        sink: (msg: string) => void,
+        message: string,
+        modulePath?: string,
+        stackTraceLine?: string
+    ) {
+        if (this.#level > level) return;
+
+        try {
+            const msg = `${formatTimestamp()} | ${label} |${modulePath ? ` ${modulePath}:${stackTraceLine || this.#getStackTrace()} |` : ` ${extractStackTracePath(4)} |`} ${message}`;
             (this.#options.enableWriteLog ? (
                 await this.#log(msg),
-                this.#printLevel <= 2 ? this.#options.logPrint : false
-            ) : this.#printLevel <= 2 ? this.#options.logPrint : false) &&
-                console.info('\x1b[32m%s\x1b[0m', msg);
+                this.#printLevel <= level ? this.#options.logPrint : false
+            ) : this.#printLevel <= level ? this.#options.logPrint : false) &&
+                sink(msg);
 
             // 检查缓存是否超过最大容量，若是则输出日志
             if (this.#logsCache.length >= this.#options.maxCacheSize && this.#options.enableWriteLog) {
@@ -232,7 +252,13 @@ class Log {
                     `${this.#options.name}_${formatTimestamp().replace(/[<>:"/\\|?*]/g, '_')}.log`
                 ));
             }
+        } catch (err) {
+            console.error(`[Log] 记录 ${label} 日志失败:`, handleError(err).msg);
         }
+    }
+
+    async info(message: string, modulePath?: string, stackTraceLine?: string) {
+        await this.#write(2, 'INFO', msg => console.info('\x1b[32m%s\x1b[0m', msg), message, modulePath, stackTraceLine);
     }
 
     /**
@@ -242,23 +268,7 @@ class Log {
      * @param stackTraceLine 代码执行位置行列数
      */
     async warn(message: string, modulePath?: string, stackTraceLine?: string) {
-        if (this.#level <= 3) {
-            const msg = `${formatTimestamp()} | WARN |${modulePath ? ` ${modulePath}:${stackTraceLine || this.#getStackTrace()} |` : ` ${extractStackTracePath(4)} |`} ${message}`;
-            (this.#options.enableWriteLog ? (
-                await this.#log(msg),
-                this.#printLevel <= 3 ? this.#options.logPrint : false
-            ) : this.#printLevel <= 3 ? this.#options.logPrint : false) &&
-                console.warn('\x1b[33m%s\x1b[0m', msg);
-
-            // 检查缓存是否超过最大容量，若是则输出日志
-            if (this.#logsCache.length >= this.#options.maxCacheSize && this.#options.enableWriteLog) {
-                await this.appendData(path.join(
-                    this.#options.filePath,
-                    // `${this.#options.name}_${formatTimestamp(this.#options.nowTime).replace(/[<>:"/\\|?*]/g, '_')}.log`
-                    `${this.#options.name}_${formatTimestamp().replace(/[<>:"/\\|?*]/g, '_')}.log`
-                ));
-            }
-        }
+        await this.#write(3, 'WARN', msg => console.warn('\x1b[33m%s\x1b[0m', msg), message, modulePath, stackTraceLine);
     }
 
     /**
@@ -268,23 +278,7 @@ class Log {
      * @param stackTraceLine 代码执行位置行列数
      */
     async error(message: string, modulePath?: string, stackTraceLine?: string) {
-        if (this.#level <= 4) {
-            const msg = `${formatTimestamp()} | ERROR |${modulePath ? ` ${modulePath}:${stackTraceLine || this.#getStackTrace()} |` : ` ${extractStackTracePath(4)} |`} ${message}`;
-            (this.#options.enableWriteLog ? (
-                await this.#log(msg),
-                this.#printLevel <= 4 ? this.#options.logPrint : false
-            ) : this.#printLevel <= 4 ? this.#options.logPrint : false) &&
-                console.error('\x1b[31m%s\x1b[0m', msg);
-
-            // 检查缓存是否超过最大容量，若是则输出日志
-            if (this.#logsCache.length >= this.#options.maxCacheSize && this.#options.enableWriteLog) {
-                await this.appendData(path.join(
-                    this.#options.filePath,
-                    // `${this.#options.name}_${formatTimestamp(this.#options.nowTime).replace(/[<>:"/\\|?*]/g, '_')}.log`
-                    `${this.#options.name}_${formatTimestamp().replace(/[<>:"/\\|?*]/g, '_')}.log`
-                ));
-            }
-        }
+        await this.#write(4, 'ERROR', msg => console.error('\x1b[31m%s\x1b[0m', msg), message, modulePath, stackTraceLine);
     }
 
     /**
@@ -294,23 +288,7 @@ class Log {
      * @param stackTraceLine 代码执行位置行列数
      */
     async debug(message: string, modulePath?: string, stackTraceLine?: string) {
-        if (this.#level <= 1) {
-            const msg = `${formatTimestamp()} | DEBUG |${modulePath ? ` ${modulePath}:${stackTraceLine || this.#getStackTrace()} |` : ` ${extractStackTracePath(4)} |`} ${message}`;
-            (this.#options.enableWriteLog ? (
-                await this.#log(msg),
-                this.#printLevel <= 1 ? this.#options.logPrint : false
-            ) : this.#printLevel <= 1 ? this.#options.logPrint : false) &&
-                console.debug('\x1b[36m%s\x1b[0m', msg);
-
-            // 检查缓存是否超过最大容量，若是则输出日志
-            if (this.#logsCache.length >= this.#options.maxCacheSize && this.#options.enableWriteLog) {
-                await this.appendData(path.join(
-                    this.#options.filePath,
-                    // `${this.#options.name}_${formatTimestamp(this.#options.nowTime).replace(/[<>:"/\\|?*]/g, '_')}.log`
-                    `${this.#options.name}_${formatTimestamp().replace(/[<>:"/\\|?*]/g, '_')}.log`
-                ));
-            }
-        }
+        await this.#write(1, 'DEBUG', msg => console.debug('\x1b[36m%s\x1b[0m', msg), message, modulePath, stackTraceLine);
     }
 
     print() {
@@ -360,14 +338,20 @@ class Log {
     }
 
     #getStackTrace() {
+        // 调用栈可能比 3 层还浅（Promise 续体 / wasm 回调里调 logger），或该帧没有 `:行:列`，
+        // 此时返回 '?:?' 兜底 —— 日志工具绝不能抛错把应用带崩（曾因此在启动时崩溃）
         try {
             throw new Error("");
         } catch (e) {
-            // @ts-ignore
-            return e.stack
-                .split(/\n+/)[3]
-                .replace(/(^\s+|\s+$)/, "")
-                .match(/:(\d+:\d+)/)[1];
+            try {
+                // @ts-ignore
+                const lines = e.stack.split(/\n+/);
+                const raw = lines[3] ?? lines[lines.length - 1] ?? '';
+                const m = raw.replace(/(^\s+|\s+$)/, "").match(/:(\d+:\d+)/);
+                return m ? m[1] : '?:?';
+            } catch {
+                return '?:?';
+            }
         }
     }
 

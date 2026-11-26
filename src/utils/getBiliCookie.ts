@@ -1,4 +1,4 @@
-import { Cookies } from "../type/Cookies.js";
+import type { Cookies } from "../model/cookies.js";
 import { cookiesToObject } from "./cookies/toObject.js";
 import readText from "./readText.js";
 

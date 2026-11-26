@@ -1,0 +1,67 @@
+# BiliLiveReplayDL —— 容器化运行
+#
+# 启动：docker compose up -d --build
+# 看日志：docker compose logs -f
+# 停止：docker compose down          （发 SIGTERM，走优雅退出：落盘日志缓冲后再结束）
+#
+# 前置：在宿主机建好三个目录（宿主机与容器都要读写）
+#   mkdir -p recordings logs data
+# 若不用内网 cookie 服务，把导出的 cookies.json 放到 ./data/ 下，
+# 并把 src/config.ts 里 cookies_mgmt.enable 改成 false（详见文件末尾说明）。
+
+services:
+  recorder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # 国内拉 npm 包慢/超时的话取消注释（镜像源）
+      args:
+        NPM_REGISTRY: https://registry.npmmirror.com
+    # 镜像名（repository）必须全小写；容器名则允许大写，所以两者不同
+    image: bili-live-replay-dl-recorder:latest
+    container_name: biliLiveReplayDL-recorder
+
+    # 异常退出/宿主重启后自动拉起；手动 docker compose stop 则不会被重启
+    restart: unless-stopped
+
+    environment:
+      # 日志时间戳用本地时区（不设则为 UTC，排查时对不上）
+      TZ: Asia/Shanghai
+      # 需要覆盖 config.ts 里的输出目录时才用得上（当前代码读的是写死的 ./recordings）
+      # NODE_ENV: production
+
+    volumes:
+      # 录制产物：combined.m4s / 播放列表 / fragments 都在这里
+      - ./recordings:/app/recordings
+      # 日志（缓冲最多 5000 条，优雅退出时落盘）
+      - ./logs:/app/logs
+      # cookies.json 回落路径（config.cookiesJSONPath 默认 './data/cookies.json'）
+      - ./data:/app/data
+
+    # 给优雅退出留足时间（进程内 3 秒强制兜底，10~15 秒足够写完日志）
+    stop_grace_period: 15s
+
+    # 记录器是单房间任务，日常占用很低；校验 worker 池按宿主核数创建（不认 cgroup 限制），
+    # 真要限流就限制在宿主核数之上，否则 worker 之间会互相抢 CPU：
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2'
+    #       memory: 2g
+
+    # 容器日志轮转（长时间运行务必限制，否则 json-file 会无限增长）
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+    # cookie 服务跑在「宿主机」上时，容器默认走不到 127.0.0.1，两种解法：
+    # 1) Linux 上用宿主网络（同时就不再需要 ports 映射）：
+    # network_mode: host
+    # 2) 或者把 src/config.ts 的 api_url 改成宿主机在容器网络里的地址：
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+
+# 说明：运行镜像里没有 node_modules —— 编译产物只依赖 Node 内置模块与自身模块，
+# 所以镜像很小，也不需要联网装依赖。改代码后重新 `docker compose up -d --build` 即可。

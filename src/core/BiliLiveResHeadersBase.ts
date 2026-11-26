@@ -1,4 +1,4 @@
-import type { Cookies } from "../type/Cookies.js";
+import type { Cookies } from "../model/cookies.js";
 import { cookiesToString } from "../utils/cookies/toString.js";
 
 /**

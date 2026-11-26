@@ -3,10 +3,10 @@
  * @param buf 分片二进制数据
  * @returns 
  */
-const listBoxes = (buf: Buffer): { 
-    ok: boolean; 
-    reason: string; 
-    boxes: Array<{ offset: number; size: number; type: string }> 
+const listBoxes = (buf: Buffer): {
+    ok: boolean;
+    reason: string;
+    boxes: Array<{ offset: number; size: number; type: string }>
 } => {
     const len = buf.length;
     let offset = 0;

@@ -1,0 +1,26 @@
+# 构建上下文里不需要的东西（镜像里全部由构建阶段重新产出）
+node_modules
+dist
+
+# 运行时产物：通过卷挂载，不要打进镜像
+recordings
+fragments
+logs
+*.log
+*.7z
+
+# 本地调试资料
+test
+artifacts
+img
+
+# 敏感文件：绝不进镜像（cookie 以卷挂载的方式提供）
+data
+cookies.json
+.env
+.env.*
+
+# 版本控制与编辑器
+.git
+.gitignore
+.vscode

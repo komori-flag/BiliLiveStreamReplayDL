@@ -1,4 +1,4 @@
-import Log from "../modules/Log/index.ts";
+import Log from "../modules/Log/index.js";
 
 
 declare global {

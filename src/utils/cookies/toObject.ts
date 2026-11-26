@@ -1,4 +1,4 @@
-import { Cookies } from "../../type.js";
+import type { Cookies } from "../../model/cookies.js";
 
 type CookiesArray = { name: string, value: string }[];
 

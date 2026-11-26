@@ -1,4 +1,4 @@
-import { Cookies } from "../../type.js";
+import type { Cookies } from "../../model/cookies.js";
 
 /**
  * Cookies 对象转换为字符串

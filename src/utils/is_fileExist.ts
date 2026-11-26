@@ -1,4 +1,4 @@
-const fs = require('fs').promises;
+import fs from 'node:fs/promises';
 
 /**
  * 检查文件是否存在
